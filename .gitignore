@@ -1,0 +1,8 @@
+.build/
+build/
+*.app/
+.DS_Store
+
+# Бенчмарк-аудио регенерируется скриптом make-benchmark-audio.sh — не версионируем.
+# Отчёты benchmarks/*.md остаются под git.
+benchmarks/audio/
