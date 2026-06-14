@@ -970,6 +970,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                     DiagnosticsLog.write("transcribe cloud ok characters=\(rawText.count)")
                 } else {
+                    // CLI-фолбэк (когда warm-server недоступен). ВАЖНО: вшитый в .app
+                    // whisper-cli на VAD-ветке на части записей падает сегфолтом (ggml VAD
+                    // в собранном бандле), а warm-server VAD не использует вовсе. Поэтому
+                    // при ЛЮБОМ сбое CLI с VAD (краш ИЛИ пустой результат) повторяем БЕЗ VAD —
+                    // это надёжный путь: лучше отдать сырой текст, чем потерять диктовку.
+                    func cliTranscribe() throws -> String {
+                        let cli = WhisperCLITranscriber()
+                        guard currentSettings.vadEnabled else {
+                            return try cli.transcribe(command: command, timeoutSeconds: 120)
+                        }
+                        do {
+                            let withVAD = try cli.transcribe(command: command, timeoutSeconds: 120)
+                            if !withVAD.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                return withVAD
+                            }
+                            DiagnosticsLog.write("CLI: пустой результат с VAD → повтор без VAD")
+                        } catch {
+                            DiagnosticsLog.write("CLI с VAD упал (\(error.localizedDescription)) → повтор без VAD")
+                        }
+                        let noVADCommand = WhisperCommand(
+                            binaryURL: URL(fileURLWithPath: EngineLocator.path(for: "whisper-cli", fallback: currentSettings.whisperBinaryPath)),
+                            modelURL: modelURL,
+                            audioURL: audioForTranscription,
+                            language: currentSettings.effectiveTranscriptionLanguage,
+                            initialPrompt: currentSettings.initialPrompt,
+                            vadEnabled: false
+                        )
+                        let noVAD = try cli.transcribe(command: noVADCommand, timeoutSeconds: 120)
+                        DiagnosticsLog.write("CLI без VAD: characters=\(noVAD.count)")
+                        return noVAD
+                    }
+
                     let server = WhisperServerService.shared
                     if server.isRunning {
                         do {
@@ -981,30 +1013,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             DiagnosticsLog.write("transcribe via warm-server ok characters=\(rawText.count)")
                         } catch {
                             DiagnosticsLog.write("warm-server failed, falling back to CLI: \(error.localizedDescription)")
-                            rawText = try WhisperCLITranscriber().transcribe(command: command, timeoutSeconds: 120)
+                            rawText = try cliTranscribe()
                         }
                     } else {
-                        rawText = try WhisperCLITranscriber().transcribe(command: command, timeoutSeconds: 120)
-                    }
-
-                    // Safety-net: запись прошла silence-gate (там есть звук выше порога), но
-                    // транскрипция вернула пустоту. Самая частая причина — VAD silero на
-                    // CLI-пути (warm-server VAD не использует) счёл тихую/короткую речь
-                    // «тишиной» и вырезал её целиком → диктовка терялась без следа.
-                    // Повторяем БЕЗ VAD: лучше отдать сырой текст, чем потерять мысль.
-                    if rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       currentSettings.vadEnabled {
-                        DiagnosticsLog.write("empty result with VAD → retry without VAD")
-                        let noVADCommand = WhisperCommand(
-                            binaryURL: URL(fileURLWithPath: EngineLocator.path(for: "whisper-cli", fallback: currentSettings.whisperBinaryPath)),
-                            modelURL: modelURL,
-                            audioURL: audioForTranscription,
-                            language: currentSettings.effectiveTranscriptionLanguage,
-                            initialPrompt: currentSettings.initialPrompt,
-                            vadEnabled: false
-                        )
-                        rawText = try WhisperCLITranscriber().transcribe(command: noVADCommand, timeoutSeconds: 120)
-                        DiagnosticsLog.write("retry without VAD characters=\(rawText.count)")
+                        rawText = try cliTranscribe()
                     }
                 }
                 // Временный предобработанный файл больше не нужен — чистим, чтобы не копить мусор в /tmp.
