@@ -8,6 +8,7 @@ public enum HotkeyMode: String, Codable, Equatable, Sendable {
 public enum DictationHotkeyAction: String, Codable, Equatable, Sendable {
     case toggleRecording
     case pushToTalk
+    case aiPrompt
 }
 
 public struct Hotkey: Codable, Equatable, Sendable {
@@ -24,6 +25,12 @@ public struct Hotkey: Codable, Equatable, Sendable {
     public var displayText: String {
         if keyCode == Self.functionKeyCode, modifierFlags == ["function"] {
             return "Fn"
+        }
+
+        // Одиночный модификатор-хоткей (напр. Option как триггер): показываем только имя
+        // клавиши, без дублирующего символа того же модификатора («Option», не «⌥ Option»).
+        if Self.isModifierOnlyKeyCode(keyCode), modifierFlags.count == 1 {
+            return Self.keyName(for: keyCode)
         }
 
         let modifierText = modifierFlags.map { flag in
@@ -50,11 +57,22 @@ public struct Hotkey: Codable, Equatable, Sendable {
         if keyCode == Self.functionKeyCode {
             return modifierFlags == ["function"]
         }
+        if Self.isModifierOnlyKeyCode(keyCode) {
+            // Одиночный модификатор как хоткей (по тапу) — разрешаем только Option/Control:
+            // Command и Shift слишком конфликтны (Cmd везде, Shift — заглавные при печати).
+            return Self.isSoloAssignableModifierKeyCode(keyCode) && modifierFlags.count == 1
+        }
         return !modifierFlags.isEmpty && !Self.isModifierOnlyKeyCode(keyCode)
     }
 
     public static var fn: Hotkey {
         Hotkey(keyCode: functionKeyCode, modifierFlags: ["function"])
+    }
+
+    /// Одиночный модификатор-хоткей (напр. Option как тап). Поддержан срабатыванием только
+    /// для «Промпт для ИИ»; toggle/PTT его не используют (tap-семантики там нет).
+    public var isSoloModifier: Bool {
+        keyCode != Self.functionKeyCode && Self.isModifierOnlyKeyCode(keyCode)
     }
 
     public static func isModifierOnlyKeyCode(_ keyCode: UInt16) -> Bool {
@@ -63,6 +81,29 @@ public struct Hotkey: Codable, Equatable, Sendable {
             return true
         default:
             return false
+        }
+    }
+
+    /// Модификаторы, которые можно назначить как ОДИНОЧНЫЙ хоткей-тап: Option (58/61) и
+    /// Control (59/62). Command (54/55) и Shift (56/60) исключены — конфликтуют с обычным
+    /// вводом и системными шорткатами.
+    public static func isSoloAssignableModifierKeyCode(_ keyCode: UInt16) -> Bool {
+        switch keyCode {
+        case 58, 59, 61, 62:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Имя модификатора (для `modifierFlags`) по его keyCode, если это модификатор-клавиша.
+    public static func modifierName(forKeyCode keyCode: UInt16) -> String? {
+        switch keyCode {
+        case 54, 55: return "command"
+        case 56, 60: return "shift"
+        case 58, 61: return "option"
+        case 59, 62: return "control"
+        default: return nil
         }
     }
 
@@ -317,6 +358,13 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var initialPrompt: String
     public var toggleHotkey: Hotkey
     public var pushToTalkHotkey: Hotkey
+    /// Хоткей режима «Промпт для ИИ» (toggle-семантика, как у `toggleHotkey`): надиктованная
+    /// речь переформулируется LLM в чёткий промпт для ИИ-ассистента, а не просто полируется.
+    /// Неназначен по умолчанию (`Hotkey(keyCode: 0, modifierFlags: [])`, не `isAssignable`).
+    public var aiPromptHotkey: Hotkey
+    /// Если включено — режим «Промпт для ИИ» применяется ко ВСЕМ диктовкам (например, на время
+    /// долгой сессии в Claude Code), а не только при нажатии `aiPromptHotkey`.
+    public var aiPromptModeEnabled: Bool
     public var whisperBinaryPath: String
     public var modelDirectoryPath: String
     /// Что делать с воспроизводимым медиа на время записи.
@@ -338,6 +386,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var interfaceLanguage: String
     /// Путь к бинарю `llama-server` (llama.cpp) для локальной LLM-полировки.
     public var localLLMServerBinaryPath: String
+    /// ID выбранной модели полировки «Умная (ИИ)» из каталога `LocalLLMModel`.
+    public var selectedLLMModelID: String
     /// Пройден ли первичный онбординг (права, знакомство с хоткеем).
     public var hasCompletedOnboarding: Bool
     /// Запускать приложение при входе в систему (login item, `SMAppService`).
@@ -393,6 +443,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         pushToTalkHotkey: Hotkey,
         whisperBinaryPath: String,
         modelDirectoryPath: String,
+        aiPromptHotkey: Hotkey = AppSettings.unassignedHotkey,
+        aiPromptModeEnabled: Bool = false,
         mediaInterruptionMode: MediaInterruptionMode = .pause,
         polishLevel: PolishLevel = .rules,
         smartContextEnabled: Bool = false,
@@ -402,6 +454,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         inputDeviceUID: String = "",
         interfaceLanguage: String = AppSettings.automaticInterfaceLanguage,
         localLLMServerBinaryPath: String = "/opt/homebrew/bin/llama-server",
+        selectedLLMModelID: String = LocalLLMModel.default.id,
         hasCompletedOnboarding: Bool = false,
         launchAtLogin: Bool = false,
         showInDock: Bool = true,
@@ -426,6 +479,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.initialPrompt = initialPrompt
         self.toggleHotkey = toggleHotkey
         self.pushToTalkHotkey = pushToTalkHotkey
+        self.aiPromptHotkey = aiPromptHotkey
+        self.aiPromptModeEnabled = aiPromptModeEnabled
         self.whisperBinaryPath = whisperBinaryPath
         self.modelDirectoryPath = modelDirectoryPath
         self.mediaInterruptionMode = mediaInterruptionMode
@@ -437,6 +492,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.inputDeviceUID = inputDeviceUID
         self.interfaceLanguage = interfaceLanguage
         self.localLLMServerBinaryPath = localLLMServerBinaryPath
+        self.selectedLLMModelID = selectedLLMModelID
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.launchAtLogin = launchAtLogin
         self.showInDock = showInDock
@@ -517,6 +573,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case initialPrompt
         case toggleHotkey
         case pushToTalkHotkey
+        case aiPromptHotkey
+        case aiPromptModeEnabled
         case hotkeyMode
         case hotkey
         case whisperBinaryPath
@@ -534,6 +592,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case inputDeviceUID
         case interfaceLanguage
         case localLLMServerBinaryPath
+        case selectedLLMModelID
         case hasCompletedOnboarding
         case launchAtLogin
         case showInDock
@@ -564,17 +623,27 @@ public struct AppSettings: Codable, Equatable, Sendable {
         initialPrompt = decodedPrompt == AppSettings.legacyInstructionPrompt ? defaults.initialPrompt : decodedPrompt
         let decodedToggleHotkey = try container.decodeIfPresent(Hotkey.self, forKey: .toggleHotkey)
         let legacyHotkey = try container.decodeIfPresent(Hotkey.self, forKey: .hotkey)
+        // toggle/PTT не поддерживают «тап» одиночного модификатора (он реализован только для
+        // «Промпт для ИИ»), поэтому solo-модификатор для них невалиден — падаем на дефолт.
         let toggleCandidate = decodedToggleHotkey ?? legacyHotkey ?? defaults.toggleHotkey
-        toggleHotkey = toggleCandidate.isAssignable ? toggleCandidate : defaults.toggleHotkey
+        toggleHotkey = (toggleCandidate.isAssignable && !toggleCandidate.isSoloModifier) ? toggleCandidate : defaults.toggleHotkey
 
         let decodedPushToTalkHotkey = try container.decodeIfPresent(Hotkey.self, forKey: .pushToTalkHotkey)
         if let decodedPushToTalkHotkey {
-            pushToTalkHotkey = decodedPushToTalkHotkey.isAssignable ? decodedPushToTalkHotkey : defaults.pushToTalkHotkey
+            pushToTalkHotkey = (decodedPushToTalkHotkey.isAssignable && !decodedPushToTalkHotkey.isSoloModifier) ? decodedPushToTalkHotkey : defaults.pushToTalkHotkey
         } else {
             pushToTalkHotkey = defaults.pushToTalkHotkey == toggleHotkey
                 ? AppSettings.alternatePushToTalkHotkey
                 : defaults.pushToTalkHotkey
         }
+
+        let decodedAIPromptHotkey = try container.decodeIfPresent(Hotkey.self, forKey: .aiPromptHotkey)
+        if let decodedAIPromptHotkey, decodedAIPromptHotkey.isAssignable {
+            aiPromptHotkey = decodedAIPromptHotkey
+        } else {
+            aiPromptHotkey = AppSettings.unassignedHotkey
+        }
+        aiPromptModeEnabled = try container.decodeIfPresent(Bool.self, forKey: .aiPromptModeEnabled) ?? defaults.aiPromptModeEnabled
         whisperBinaryPath = try container.decodeIfPresent(String.self, forKey: .whisperBinaryPath) ?? defaults.whisperBinaryPath
         modelDirectoryPath = try container.decodeIfPresent(String.self, forKey: .modelDirectoryPath) ?? defaults.modelDirectoryPath
         if let decodedMode = try container.decodeIfPresent(MediaInterruptionMode.self, forKey: .mediaInterruptionMode) {
@@ -598,6 +667,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         inputDeviceUID = try container.decodeIfPresent(String.self, forKey: .inputDeviceUID) ?? defaults.inputDeviceUID
         interfaceLanguage = try container.decodeIfPresent(String.self, forKey: .interfaceLanguage) ?? defaults.interfaceLanguage
         localLLMServerBinaryPath = try container.decodeIfPresent(String.self, forKey: .localLLMServerBinaryPath) ?? defaults.localLLMServerBinaryPath
+        selectedLLMModelID = try container.decodeIfPresent(String.self, forKey: .selectedLLMModelID) ?? defaults.selectedLLMModelID
         hasCompletedOnboarding = try container.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? defaults.hasCompletedOnboarding
         launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? defaults.launchAtLogin
         showInDock = try container.decodeIfPresent(Bool.self, forKey: .showInDock) ?? defaults.showInDock
@@ -636,6 +706,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         try container.encode(initialPrompt, forKey: .initialPrompt)
         try container.encode(toggleHotkey, forKey: .toggleHotkey)
         try container.encode(pushToTalkHotkey, forKey: .pushToTalkHotkey)
+        try container.encode(aiPromptHotkey, forKey: .aiPromptHotkey)
+        try container.encode(aiPromptModeEnabled, forKey: .aiPromptModeEnabled)
         try container.encode(whisperBinaryPath, forKey: .whisperBinaryPath)
         try container.encode(modelDirectoryPath, forKey: .modelDirectoryPath)
         try container.encode(mediaInterruptionMode, forKey: .mediaInterruptionMode)
@@ -647,6 +719,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         try container.encode(inputDeviceUID, forKey: .inputDeviceUID)
         try container.encode(interfaceLanguage, forKey: .interfaceLanguage)
         try container.encode(localLLMServerBinaryPath, forKey: .localLLMServerBinaryPath)
+        try container.encode(selectedLLMModelID, forKey: .selectedLLMModelID)
         try container.encode(hasCompletedOnboarding, forKey: .hasCompletedOnboarding)
         try container.encode(launchAtLogin, forKey: .launchAtLogin)
         try container.encode(showInDock, forKey: .showInDock)
@@ -693,6 +766,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
         Hotkey(keyCode: 40, modifierFlags: ["control", "option"])
     }
 
+    /// Хоткей-заглушка для опциональных действий (например, «Промпт для ИИ»), пока
+    /// пользователь не назначил свой. `isAssignable == false`, поэтому не регистрируется.
+    public static var unassignedHotkey: Hotkey {
+        Hotkey(keyCode: 0, modifierFlags: [])
+    }
+
     /// Глоссарий имён собственных/терминов для whisper `initial_prompt`. ВАЖНО: whisper
     /// НЕ выполняет инструкции — `initial_prompt` работает как «предшествующий текст» и лишь
     /// смещает словарь/стиль. Поэтому здесь список терминов, а не указания. Помогает писать
@@ -706,6 +785,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     public var hasHotkeyConflict: Bool {
         toggleHotkey == pushToTalkHotkey
+            || (aiPromptHotkey.isAssignable && (aiPromptHotkey == toggleHotkey || aiPromptHotkey == pushToTalkHotkey))
     }
 
     /// URL к VAD-модели Silero, если файл скачан в папку моделей.
@@ -721,6 +801,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
         }
         return URL(fileURLWithPath: modelDirectoryPath, isDirectory: true)
             .appendingPathComponent(profile.fileName)
+    }
+
+    /// Выбранная модель полировки «Умная (ИИ)» из каталога (фолбэк на дефолт, если
+    /// сохранённый ID неизвестен — напр. после отката версии).
+    public var selectedLLMModel: LocalLLMModel {
+        LocalLLMModel.find(id: selectedLLMModelID) ?? .default
     }
 }
 

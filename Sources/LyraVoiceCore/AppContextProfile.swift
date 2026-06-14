@@ -12,6 +12,9 @@ public enum TargetTextFormat: String, Codable, Equatable, Sendable {
     case searchQuery
     case filePath
     case documentText
+    /// Пользователь диктует запрос для ИИ-ассистента (терминал с Claude Code/Codex,
+    /// чат с ChatGPT/Claude и т.п.) — режим «Промпт для ИИ» (хоткей/тумбл), не авто-детект.
+    case aiPrompt
 }
 
 public struct ScreenContextSnapshot: Codable, Equatable, Sendable {
@@ -169,7 +172,12 @@ public struct AppContextProfile: Codable, Equatable, Sendable {
              "com.jetbrains.webstorm",
              "com.jetbrains.rider",
              "com.apple.dt.xcode":
-            return AppContextProfile(format: .code, displayName: name, screenContext: sanitizedContext)
+            // В редакторах кода голосом диктуют ПРОЗУ (промпты для ИИ-ассистента,
+            // комментарии, сообщения коммитов, описания), а не сырой синтаксис.
+            // Поэтому обрабатываем как обычный текст (пунктуация/заглавные/абзацы),
+            // а не codeLikeCleanup, который их срезал и «портил умный контекст».
+            // Для диктовки именно запроса к ИИ есть явный режим «Промпт для ИИ».
+            return AppContextProfile(format: .plainText, displayName: name, screenContext: sanitizedContext)
 
         case "com.tinyspeck.slackmacgap",
              "com.apple.messages",

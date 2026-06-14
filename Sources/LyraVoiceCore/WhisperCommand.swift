@@ -85,6 +85,11 @@ public struct WhisperCommand: Equatable, Sendable {
             args += [
                 "--vad",
                 "-vm", vadURL.path,
+                // threshold 0.35 (вместо дефолтных 0.5): тихая/начитанная вполголоса речь
+                // даёт более низкую вероятность речи у silero — на 0.5 целые короткие
+                // диктовки отсекались как «тишина» (0 символов, диктовка терялась). 0.35
+                // консервативно ловит тихую речь, не впуская явный шумовой пол.
+                "--vad-threshold", "0.35",
                 "--vad-min-silence-duration-ms", "2000",
                 "--vad-speech-pad-ms", "400",
                 "--vad-max-speech-duration-s", "30"

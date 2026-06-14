@@ -17,6 +17,5 @@ public enum AppBrand {
     public static let versionString = "0.1.0"
 
     /// Репозиторий GitHub (owner/name) для проверки обновлений через Releases API.
-    /// TODO: заменить на реальный репозиторий после публикации проекта на GitHub.
-    public static let updateRepository = "TODO-owner/lyra-voice"
+    public static let updateRepository = "AstorTiko/lyra-voice"
 }

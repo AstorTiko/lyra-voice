@@ -27,7 +27,7 @@ public enum BuiltInVocabulary {
             category: .aiTool
         ),
         VocabularyEntry(
-            phrases: ["клод код", "клод коде", "клод козе", "claude code"],
+            phrases: ["клод код", "клод коде", "клод козе", "claude code", "cloud code"],
             canonical: "Claude Code",
             category: .aiTool
         ),

@@ -18,9 +18,11 @@ final class WhisperServerService: @unchecked Sendable {
     private let port = 56789
 
     /// Остановить сервер если молчание дольше этого времени. 0 = никогда.
-    /// 15 минут: держим модель тёплой между диктовками (нужно для live-стриминга и
-    /// мгновенного финального распознавания), но не висим в памяти бесконечно.
-    var idleShutdownSeconds: Double = 15 * 60
+    /// 30 минут: держим модель тёплой между диктовками (нужно для live-стриминга,
+    /// мгновенного финального распознавания и — главное — чтобы распознавание шло БЕЗ
+    /// VAD, который на CLI-пути иногда вырезает тихую/короткую речь целиком). Дольше
+    /// тёплый сервер = реже падаем на CLI+VAD = меньше потерянных диктовок.
+    var idleShutdownSeconds: Double = 30 * 60
 
     private var idleTimer: DispatchSourceTimer?
     private let timerQueue = DispatchQueue(label: "ai.lyra.whisper-server.idle")
@@ -37,7 +39,7 @@ final class WhisperServerService: @unchecked Sendable {
     /// - Блокирует до готовности (≤ 8 с); если не поднялся — false без throw.
     @discardableResult
     func startIfNeeded(
-        serverBinaryPath: String = "/opt/homebrew/bin/whisper-server",
+        serverBinaryPath: String = EngineLocator.path(for: "whisper-server", fallback: "/opt/homebrew/bin/whisper-server"),
         modelURL: URL,
         threads: Int = WhisperCommand.recommendedThreadCount,
         beamSize: Int = 5,

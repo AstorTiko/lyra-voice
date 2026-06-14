@@ -41,6 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlayDismissWorkItem: DispatchWorkItem?
     private var functionHotkeyIsDown = false
     private var lastFunctionToggleDate: Date?
+    // Состояние «тапа» одиночного модификатора (Option/Control) для хоткея «Промпт для ИИ».
+    private var aiPromptModifierArmed = false
+    private var aiPromptModifierClean = false
+    private var aiPromptModifierDownTime: Date?
+    /// Текущая запись запущена через хоткей «Промпт для ИИ» — следующая транскрипция
+    /// принудительно использует формат `.aiPrompt`, независимо от Smart Context.
+    /// Сбрасывается сразу после прочтения в `transcribe`.
+    private var activeRecordingAIPromptOverride = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureStorage()
@@ -478,7 +486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 } else {
                     let command = WhisperCommand(
-                        binaryURL: URL(fileURLWithPath: currentSettings.whisperBinaryPath),
+                        binaryURL: URL(fileURLWithPath: EngineLocator.path(for: "whisper-cli", fallback: currentSettings.whisperBinaryPath)),
                         modelURL: try currentSettings.modelURL(),
                         audioURL: audioURL,
                         language: currentSettings.effectiveTranscriptionLanguage,
@@ -570,6 +578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if streamingTextAtStop.isEmpty, let peak, peak < Self.silenceGateDBFS {
                 DiagnosticsLog.write("silence gate: skipping transcription (peak=\(String(format: "%.1f", peak)) dBFS < \(Self.silenceGateDBFS), no streaming text)")
                 try? FileManager.default.removeItem(at: recordedAudio.url)
+                activeRecordingAIPromptOverride = false
                 setControlPanelState(.idle)
                 overlayController.hide()
                 return
@@ -592,6 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 mediaController.restoreIfNeeded()
                 feedbackSoundPlayer.playRecordingCancelled()
             }
+            activeRecordingAIPromptOverride = false
             stopRecordingTimer()
             setControlPanelState(.idle)
             overlayController.hide()
@@ -747,11 +757,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleAppShortcut(_ event: NSEvent) -> Bool {
+        if handleAIPromptHotkey(event) {
+            return true
+        }
         if handleToggleHotkey(event) {
             return true
         }
         if handlePushToTalkHotkey(event) {
             return true
+        }
+        return false
+    }
+
+    /// Хоткей «Промпт для ИИ» (toggle-семантика): первое нажатие запускает запись с
+    /// принудительным форматом `.aiPrompt`, повторное — останавливает и транскрибирует.
+    /// Неназначенный хоткей (`isAssignable == false`) никогда не матчится.
+    private func handleAIPromptHotkey(_ event: NSEvent) -> Bool {
+        let hotkey = settings.aiPromptHotkey
+        guard hotkey.isAssignable else { return false }
+
+        // Одиночный модификатор (Option/Control) — срабатывание по «тапу»: нажал и отпустил
+        // без других клавиш/модификаторов и быстро. Так Option-триггер не мешает обычному
+        // использованию Option (Option+буква для символа, Ctrl+Option для PTT — «грязно»).
+        if Hotkey.isModifierOnlyKeyCode(hotkey.keyCode), let modifierName = hotkey.modifierFlags.first {
+            return handleSoloModifierAIPrompt(event, modifierName: modifierName)
+        }
+
+        guard event.type == .keyDown, event.matches(hotkey) else { return false }
+        triggerAIPromptToggle()
+        return true
+    }
+
+    private func triggerAIPromptToggle() {
+        if audioRecorder.isRecording {
+            stopAndTranscribeRecording()
+        } else if controlPanelState.canStartRecording {
+            activeRecordingAIPromptOverride = true
+            startRecordingWithOverlayMode(.toggle)
+        }
+    }
+
+    /// Детектор «тапа» одиночного модификатора для AI-Prompt. Срабатывает только если
+    /// модификатор нажат и отпущен быстро, БЕЗ обычных клавиш и БЕЗ других модификаторов
+    /// в этот момент — иначе это часть комбо/печати, игнорируем.
+    private func handleSoloModifierAIPrompt(_ event: NSEvent, modifierName: String) -> Bool {
+        let flag: NSEvent.ModifierFlags
+        switch modifierName {
+        case "option": flag = .option
+        case "control": flag = .control
+        case "command": flag = .command
+        case "shift": flag = .shift
+        default: return false
+        }
+        let allFlags: NSEvent.ModifierFlags = [.command, .option, .control, .shift, .function]
+        let otherFlags = allFlags.subtracting(flag)
+
+        if event.type == .keyDown {
+            // Обычная клавиша во время удержания модификатора → это комбо, не одиночный тап.
+            aiPromptModifierClean = false
+            return false
+        }
+        guard event.type == .flagsChanged else { return false }
+
+        let isOurDown = event.modifierFlags.contains(flag)
+        let hasOthers = !event.modifierFlags.intersection(otherFlags).isEmpty
+
+        if isOurDown {
+            if !aiPromptModifierArmed {
+                aiPromptModifierArmed = true
+                aiPromptModifierClean = !hasOthers
+                aiPromptModifierDownTime = Date()
+            } else if hasOthers {
+                aiPromptModifierClean = false
+            }
+            return false
+        }
+
+        // Модификатор отпущен.
+        if aiPromptModifierArmed {
+            aiPromptModifierArmed = false
+            let quick = aiPromptModifierDownTime.map { Date().timeIntervalSince($0) < 0.6 } ?? false
+            let wasClean = aiPromptModifierClean
+            aiPromptModifierClean = false
+            aiPromptModifierDownTime = nil
+            if wasClean, quick, !hasOthers {
+                triggerAIPromptToggle()
+                return true
+            }
         }
         return false
     }
@@ -858,7 +950,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let audioForTranscription = audioURL
 
                 let command = WhisperCommand(
-                    binaryURL: URL(fileURLWithPath: currentSettings.whisperBinaryPath),
+                    binaryURL: URL(fileURLWithPath: EngineLocator.path(for: "whisper-cli", fallback: currentSettings.whisperBinaryPath)),
                     modelURL: modelURL,
                     audioURL: audioForTranscription,
                     language: currentSettings.effectiveTranscriptionLanguage,
@@ -867,7 +959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     vadModelURL: currentSettings.vadModelURL()
                 )
 
-                let rawText: String
+                var rawText: String
                 if currentSettings.transcriptionProvider == .openAI {
                     DiagnosticsLog.write("transcribe via cloud model=\(currentSettings.openAITranscriptionModel.rawValue)")
                     rawText = try CloudTranscriptionService.transcribe(
@@ -894,6 +986,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     } else {
                         rawText = try WhisperCLITranscriber().transcribe(command: command, timeoutSeconds: 120)
                     }
+
+                    // Safety-net: запись прошла silence-gate (там есть звук выше порога), но
+                    // транскрипция вернула пустоту. Самая частая причина — VAD silero на
+                    // CLI-пути (warm-server VAD не использует) счёл тихую/короткую речь
+                    // «тишиной» и вырезал её целиком → диктовка терялась без следа.
+                    // Повторяем БЕЗ VAD: лучше отдать сырой текст, чем потерять мысль.
+                    if rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       currentSettings.vadEnabled {
+                        DiagnosticsLog.write("empty result with VAD → retry without VAD")
+                        let noVADCommand = WhisperCommand(
+                            binaryURL: URL(fileURLWithPath: EngineLocator.path(for: "whisper-cli", fallback: currentSettings.whisperBinaryPath)),
+                            modelURL: modelURL,
+                            audioURL: audioForTranscription,
+                            language: currentSettings.effectiveTranscriptionLanguage,
+                            initialPrompt: currentSettings.initialPrompt,
+                            vadEnabled: false
+                        )
+                        rawText = try WhisperCLITranscriber().transcribe(command: noVADCommand, timeoutSeconds: 120)
+                        DiagnosticsLog.write("retry without VAD characters=\(rawText.count)")
+                    }
                 }
                 // Временный предобработанный файл больше не нужен — чистим, чтобы не копить мусор в /tmp.
                 if audioForTranscription != audioURL {
@@ -907,11 +1019,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let screenContext = self.screenContextReader.snapshot(
                         smartContextEnabled: currentSettings.smartContextEnabled
                     )
-                    let profile = AppContextProfile.profile(
+                    var profile = AppContextProfile.profile(
                         bundleIdentifier: self.dictationTargetApp?.bundleIdentifier,
                         localizedName: self.dictationTargetApp?.localizedName,
                         screenContext: screenContext
                     )
+                    // Режим «Промпт для ИИ»: разовый хоткей (потребляется здесь) или
+                    // постоянный тумбл. Никогда не переопределяем sensitive-поля (пароли).
+                    let aiPromptActive = self.activeRecordingAIPromptOverride || currentSettings.aiPromptModeEnabled
+                    self.activeRecordingAIPromptOverride = false
+                    if aiPromptActive, !profile.isSensitive {
+                        profile.format = .aiPrompt
+                    }
                     DiagnosticsLog.write("context profile format=\(profile.format.rawValue) target=\(profile.displayName.isEmpty ? "unknown" : profile.displayName) screenContext=\(screenContext != nil) sensitive=\(profile.isSensitive)")
                     return profile
                 }
@@ -920,7 +1039,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     dictionary: currentSettings.dictionaryReplacements,
                     removeFillers: currentSettings.removeFillerWords,
                     localLLMEndpoint: llmEndpoint,
-                    context: appContext
+                    context: appContext,
+                    log: { DiagnosticsLog.write($0) }
                 )
                 // whisper рвёт текст переносами по сегментам (иногда посреди слова) —
                 // склеиваем ДО полировки, иначе финал «нечёткий» и слова разорваны.
@@ -1305,7 +1425,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Качает модель локальной полировки «Красиво» и после успеха прогревает сервер.
     private func downloadLocalLLMModel() {
         guard !isDownloadingModel else { return }
-        let model = LocalLLMModel.default
+        let model = settings.selectedLLMModel
 
         isDownloadingModel = true
         lastReportedPercent = -1
@@ -1437,12 +1557,32 @@ extension AppDelegate: ControlPanelWindowControllerDelegate {
         // Поднимаем llama-server при выборе «Красиво», гасим при переключении прочь.
         if level == .localLLM {
             localLLMServer.ensureRunning(for: settings)
-            if !LocalLLMModel.default.isDownloaded(inModelDirectory: settings.modelDirectoryPath) {
-                downloadStatus = L.t("Красиво: сначала скачайте модель \(LocalLLMModel.default.displayName) (\(LocalLLMModel.default.sizeLabel))", "Beautiful: download the model first — \(LocalLLMModel.default.displayName) (\(LocalLLMModel.default.sizeLabel))")
+            let model = settings.selectedLLMModel
+            if !model.isDownloaded(inModelDirectory: settings.modelDirectoryPath) {
+                downloadStatus = L.t("Умная (ИИ): сначала скачайте модель \(model.displayName) (\(model.sizeLabel))", "Smart (AI): download the model first — \(model.displayName) (\(model.sizeLabel))")
             }
         } else {
             localLLMServer.stop()
         }
+    }
+
+    /// Пользователь выбрал другую модель полировки в каталоге. Сохраняем, и если активен
+    /// уровень «Умная (ИИ)» — перезапускаем сервер с новой моделью (или подсказываем
+    /// скачать, если её ещё нет на диске).
+    func controlPanelDidSelectLLMModel(_ model: LocalLLMModel) {
+        guard settings.selectedLLMModelID != model.id else { return }
+        settings.selectedLLMModelID = model.id
+        saveSettings()
+        if settings.polishLevel == .localLLM {
+            localLLMServer.stop()
+            if model.isDownloaded(inModelDirectory: settings.modelDirectoryPath) {
+                localLLMServer.ensureRunning(for: settings)
+                downloadStatus = L.t("Модель полировки: \(model.displayName)", "Polish model: \(model.displayName)")
+            } else {
+                downloadStatus = L.t("Умная (ИИ): скачайте модель \(model.displayName) (\(model.sizeLabel))", "Smart (AI): download \(model.displayName) (\(model.sizeLabel))")
+            }
+        }
+        updateControlPanel()
     }
 
     func controlPanelDidSetMediaInterruptionMode(_ mode: MediaInterruptionMode) {
@@ -1460,6 +1600,14 @@ extension AppDelegate: ControlPanelWindowControllerDelegate {
     func controlPanelDidSetRemoveFillers(_ enabled: Bool) {
         settings.removeFillerWords = enabled
         downloadStatus = enabled ? L.t("Слова-паразиты будут убираться", "Filler words will be removed") : L.t("Слова-паразиты сохраняются", "Filler words are kept")
+        saveSettings()
+    }
+
+    func controlPanelDidSetAIPromptModeEnabled(_ enabled: Bool) {
+        settings.aiPromptModeEnabled = enabled
+        downloadStatus = enabled
+            ? L.t("Каждая диктовка станет промптом для ИИ", "Every dictation becomes an AI prompt")
+            : L.t("Режим «Промпт для ИИ» выключен", "“AI Prompt” mode disabled")
         saveSettings()
     }
 
@@ -1684,8 +1832,24 @@ extension AppDelegate: ControlPanelWindowControllerDelegate {
             }
             settings.pushToTalkHotkey = hotkey
             downloadStatus = L.t("Зажать для диктовки сохранено: \(hotkey.displayText)", "Hold-to-dictate saved: \(hotkey.displayText)")
+        case .aiPrompt:
+            guard hotkey != settings.toggleHotkey, hotkey != settings.pushToTalkHotkey else {
+                downloadStatus = L.t("Эта клавиша уже занята другим действием", "This key is already used by another action")
+                saveSettings()
+                return
+            }
+            settings.aiPromptHotkey = hotkey
+            downloadStatus = L.t("«Промпт для ИИ» сохранён: \(hotkey.displayText)", "“AI Prompt” saved: \(hotkey.displayText)")
         }
 
+        saveSettings()
+        functionHotkeyIsDown = false
+        startAppShortcutMonitors()
+    }
+
+    func controlPanelDidClearAIPromptHotkey() {
+        settings.aiPromptHotkey = AppSettings.unassignedHotkey
+        downloadStatus = L.t("«Промпт для ИИ» сброшен", "“AI Prompt” shortcut cleared")
         saveSettings()
         functionHotkeyIsDown = false
         startAppShortcutMonitors()

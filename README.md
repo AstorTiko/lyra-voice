@@ -28,22 +28,35 @@ Lyra Voice — macOS-приложение для голосовой диктов
 
 ## Установка
 
-Скачайте последний релиз на странице [Releases](../../releases), распакуйте `.app` и перенесите в
-`/Applications`. Сборки подписаны стабильным dev-сертификатом — при первом запуске может потребоваться
-разрешить запуск в System Settings → Privacy & Security → Open Anyway.
+Требуется **Apple Silicon Mac** (M1 и новее), macOS 13+.
 
-При первом запуске приложение запросит разрешения на доступ к микрофону и Accessibility (для
-автоматической вставки текста).
+1. Скачайте `LyraVoice-vX.Y.Z.dmg` со страницы [Releases](../../releases).
+2. Откройте DMG и перетащите **Lyra Voice** в папку **Applications**.
+3. Первый запуск (приложение подписано самоподписанным сертификатом, не нотаризовано Apple):
+   - **правый клик** по «Lyra Voice» в Applications → **Открыть** → в диалоге ещё раз **Открыть**;
+   - либо разрешите в System Settings → Privacy & Security → **Open Anyway**;
+   - если macOS пишет, что приложение «повреждено», выполните в Терминале один раз:
+     ```sh
+     xattr -cr "/Applications/Lyra Voice.app"
+     ```
+     (снимает карантин со скачанного бандла) и откройте снова.
+
+Приложение **самодостаточно**: движки распознавания (`whisper.cpp`) и полировки (`llama.cpp`)
+вшиты внутрь — **homebrew или другие установки не нужны**. При первом запуске оно запросит доступ
+к микрофону и Accessibility (для вставки текста) и предложит скачать нужные модели (whisper +
+модель ИИ для режима «Умная (ИИ)») — это единственное, что качается отдельно из-за их размера.
 
 ## Сборка из исходников
 
-Требования: macOS (Apple Silicon), Xcode/Swift toolchain, [whisper.cpp](https://github.com/ggerganov/whisper.cpp).
+Требования: macOS (Apple Silicon), Xcode/Swift toolchain, [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
+и [llama.cpp](https://github.com/ggerganov/llama.cpp) (для dev-запуска; в релизный `.app` они вшиваются).
 
 ```sh
 swift run LyraVoiceCoreSmokeTests   # тесты core-логики
 swift build                          # сборка
 scripts/download-models.sh           # скачать GGML-модели whisper.cpp
-scripts/run-dev-app.sh               # пересобрать .app и перезапустить
+scripts/run-dev-app.sh               # dev: пересобрать .app и перезапустить (движки из homebrew)
+scripts/make-dmg.sh                  # релиз: самодостаточный .app + DMG (движки вшиваются в бандл)
 ```
 
 Подробнее о структуре проекта и интерфейсе — в [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).

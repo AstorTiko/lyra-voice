@@ -58,6 +58,7 @@ public struct RulePolisher: TextPolisher {
         result = TextPostProcessor.applyContextProperNouns(result, context: context.screenContext)
         result = TextPostProcessor.normalizeDatesAndMoney(result)
         result = TextPostProcessor.formatExplicitLists(result)
+        result = TextPostProcessor.insertIntroductoryCommas(result)
         result = TextPostProcessor.lightCleanup(result)
         result = TextPostProcessor.capitalizeSentences(result)
         if context.format == .email {
@@ -92,7 +93,8 @@ public enum TextPolisherFactory {
         dictionary: [DictionaryEntry],
         removeFillers: Bool = true,
         localLLMEndpoint: URL? = nil,
-        context: AppContextProfile = AppContextProfile()
+        context: AppContextProfile = AppContextProfile(),
+        log: (@Sendable (String) -> Void)? = nil
     ) -> TextPolisher {
         let rules = RulePolisher(
             dictionary: dictionary,
@@ -103,13 +105,21 @@ public enum TextPolisherFactory {
         case .rules:
             return rules
         case .localLLM:
-            guard let endpoint = localLLMEndpoint else { return rules }
+            guard let endpoint = localLLMEndpoint else {
+                log?("LLM polish: endpoint nil (сервер не запущен) → только правила")
+                return rules
+            }
+            let systemPrompt = context.format == .aiPrompt
+                ? TextCleanupPrompt.promptify()
+                : TextCleanupPrompt.system()
             return LocalLLMPolisher(
                 endpoint: endpoint,
+                systemPrompt: systemPrompt,
                 fallback: rules,
                 dictionary: dictionary,
                 context: context,
-                removeFillers: removeFillers
+                removeFillers: removeFillers,
+                log: log
             )
         case .cloud:
             // TODO: облачная LLM по API-ключу с системным промптом

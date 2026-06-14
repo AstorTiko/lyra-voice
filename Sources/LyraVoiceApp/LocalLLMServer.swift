@@ -28,12 +28,12 @@ final class LocalLLMServer {
         guard settings.polishLevel == .localLLM else { return }
         guard !isRunning else { return }
 
-        let model = LocalLLMModel.default
+        let model = settings.selectedLLMModel
         guard model.isDownloaded(inModelDirectory: settings.modelDirectoryPath) else {
             DiagnosticsLog.write("llm server skip: model not downloaded \(model.fileName)")
             return
         }
-        let binaryPath = settings.localLLMServerBinaryPath
+        let binaryPath = EngineLocator.path(for: "llama-server", fallback: settings.localLLMServerBinaryPath)
         guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
             DiagnosticsLog.write("llm server skip: binary missing at \(binaryPath)")
             return

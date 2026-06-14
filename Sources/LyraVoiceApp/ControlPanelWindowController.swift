@@ -10,8 +10,10 @@ protocol ControlPanelWindowControllerDelegate: AnyObject {
     func controlPanelDidSelectModel(id: String)
     func controlPanelDidDownloadSelectedModel()
     func controlPanelDidDownloadLocalLLMModel()
+    func controlPanelDidSelectLLMModel(_ model: LocalLLMModel)
     func controlPanelDidOpenModelDirectory()
     func controlPanelDidSetHotkey(_ hotkey: Hotkey, for action: DictationHotkeyAction)
+    func controlPanelDidClearAIPromptHotkey()
     func controlPanelDidApplySettings(
         language: String,
         initialPrompt: String,
@@ -22,6 +24,7 @@ protocol ControlPanelWindowControllerDelegate: AnyObject {
     func controlPanelDidSetMediaInterruptionMode(_ mode: MediaInterruptionMode)
     func controlPanelDidSetAutoPaste(_ enabled: Bool)
     func controlPanelDidSetRemoveFillers(_ enabled: Bool)
+    func controlPanelDidSetAIPromptModeEnabled(_ enabled: Bool)
     func controlPanelDidSetSmartContext(_ enabled: Bool)
     func controlPanelDidSetLaunchAtLogin(_ enabled: Bool)
     func controlPanelDidSetShowInDock(_ enabled: Bool)
@@ -301,8 +304,12 @@ private final class ControlPanelView: NSView {
     private var openModelsFolderButton: StyledButton!
     private let toggleHotkeyLabel = NSTextField(labelWithString: "")
     private let pushToTalkHotkeyLabel = NSTextField(labelWithString: "")
+    private let aiPromptHotkeyLabel = NSTextField(labelWithString: "")
     private var setToggleHotkeyButton: StyledButton!
     private var setPushToTalkHotkeyButton: StyledButton!
+    private var setAIPromptHotkeyButton: StyledButton!
+    private var clearAIPromptHotkeyButton: StyledButton!
+    private var aiPromptModeToggle: SettingsToggleRow!
     private let languageField = InsetTextField(string: "")
     private var languageRow: SettingsDisclosureRow!
     private let promptField = InsetTextField(string: "")
@@ -313,6 +320,9 @@ private final class ControlPanelView: NSView {
     private let polishLevelSelector = OptionSelectorView()
     private let cloudPolishHint = NSTextField(wrappingLabelWithString: "")
     private var cloudPolishPanel: NSView?
+    /// Под-карточка выбора локальной модели — видна только при уровне «Умная (ИИ)».
+    private var localLLMModelPanel: NSView?
+    private let llmModelSelector = OptionSelectorView()
     private let llmModelHint = NSTextField(wrappingLabelWithString: "")
     private let llmModelNameLabel = NSTextField(labelWithString: "")
     private let llmSizeBadge = NSTextField(labelWithString: "")
@@ -369,6 +379,7 @@ private final class ControlPanelView: NSView {
     // Чуть ярче, чем DS.Color.success — статус «выдано» должен читаться сразу.
     private static let permissionGreen = NSColor(red: 0.22, green: 0.92, blue: 0.50, alpha: 1)
     private var hotkeyCaptureMonitor: Any?
+    private var hotkeyCaptureFocusObserver: Any?
 
     // Навигация
     private let contentScroll = NSScrollView()
@@ -439,9 +450,12 @@ private final class ControlPanelView: NSView {
 
     /// Статус, прогресс и кнопка модели локальной полировки «Красиво».
     private func renderLocalLLMControls(settings: AppSettings, isDownloadingModel: Bool, downloadStatus: String) {
-        let model = LocalLLMModel.default
+        let model = settings.selectedLLMModel
         let downloaded = model.isDownloaded(inModelDirectory: settings.modelDirectoryPath)
         let isLLMSelected = settings.polishLevel == .localLLM
+
+        // Подсвечиваем выбранную модель в селекторе каталога.
+        llmModelSelector.select(id: settings.selectedLLMModelID)
 
         llmModelNameLabel.stringValue = model.displayName
         llmSizeBadge.stringValue = model.sizeLabel
@@ -503,6 +517,8 @@ private final class ControlPanelView: NSView {
         openModelsFolderButton = StyledButton(title: L.t("Папка моделей", "Models folder"), style: .secondary, action: #selector(openModelsFolder), target: self)
         setToggleHotkeyButton = StyledButton(title: L.t("Задать клавишу", "Set key"), style: .secondary, action: #selector(beginToggleHotkeyCapture), target: self)
         setPushToTalkHotkeyButton = StyledButton(title: L.t("Задать клавишу", "Set key"), style: .secondary, action: #selector(beginPushToTalkHotkeyCapture), target: self)
+        setAIPromptHotkeyButton = StyledButton(title: L.t("Задать клавишу", "Set key"), style: .secondary, action: #selector(beginAIPromptHotkeyCapture), target: self)
+        clearAIPromptHotkeyButton = StyledButton(title: L.t("Сбросить", "Clear"), style: .ghost, action: #selector(clearAIPromptHotkey), target: self)
         applySettingsButton = StyledButton(title: L.t("Применить", "Apply"), style: .primary, action: #selector(applySettings), target: self)
         dictionaryEditor.onChange = { [weak self] entries in
             self?.delegate?.controlPanelDidSetDictionary(entries)
@@ -545,6 +561,13 @@ private final class ControlPanelView: NSView {
             title: L.t("Убирать слова-паразиты", "Remove filler words"),
             subtitle: L.t("Эээ, ну, как бы, типа, короче…", "Um, uh, like, you know…")
         ) { [weak self] on in self?.delegate?.controlPanelDidSetRemoveFillers(on) }
+
+        aiPromptModeToggle = SettingsToggleRow(
+            title: L.t("Всегда «Промпт для ИИ»", "Always “AI Prompt”"),
+            subtitle: L.t(
+                "Каждая диктовка переформулируется в чёткий промпт для ИИ-ассистента, а не просто полируется. Удобно на время сессии в Claude Code/Codex.",
+                "Every dictation is rewritten into a clear prompt for an AI assistant instead of just being polished. Handy during a Claude Code/Codex session.")
+        ) { [weak self] on in self?.delegate?.controlPanelDidSetAIPromptModeEnabled(on) }
 
         smartContextToggle = SettingsToggleRow(
             title: L.t("Умный контекст", "Smart context"),
@@ -650,11 +673,26 @@ private final class ControlPanelView: NSView {
 
         polishLevelSelector.configure(options: [
             SelectionOption(id: PolishLevel.rules.rawValue, title: L.t("Быстрая", "Fast"), subtitle: L.t("Пунктуация и паразиты — мгновенно, без ИИ", "Punctuation and filler words — instant, no AI")),
-            SelectionOption(id: PolishLevel.localLLM.rawValue, title: L.t("Умная (ИИ)", "Smart (AI)"), subtitle: L.t("Локальный ИИ (Qwen 3B) чинит грамматику и стиль — на 1–2 сек дольше", "Local AI (Qwen 3B) fixes grammar and style — adds 1–2 sec")),
+            SelectionOption(id: PolishLevel.localLLM.rawValue, title: L.t("Умная (ИИ)", "Smart (AI)"), subtitle: L.t("Локальный ИИ чинит грамматику и стиль — модель выбирается ниже", "Local AI fixes grammar and style — pick the model below")),
             SelectionOption(id: PolishLevel.cloud.rawValue, title: L.t("Облачная (ИИ)", "Cloud (AI)"), subtitle: L.t("Лучшее качество через API — нужен ключ", "Best quality via API — requires a key"))
         ]) { [weak self] id in
             guard let level = PolishLevel(rawValue: id) else { return }
             self?.delegate?.controlPanelDidSetPolishLevel(level)
+        }
+
+        // Каталог моделей полировки «Умная (ИИ)»: баланс скорость/качество. 7B помечена
+        // как рекомендованная прямо в подзаголовке.
+        llmModelSelector.configure(options: LocalLLMModel.builtInModels.map { model in
+            let recommended = model.id == LocalLLMModel.recommended.id
+            let title = recommended ? "\(model.displayName) ★" : model.displayName
+            return SelectionOption(
+                id: model.id,
+                title: title,
+                subtitle: "\(model.sizeLabel) · \(model.tierTitle)"
+            )
+        }) { [weak self] id in
+            guard let model = LocalLLMModel.find(id: id) else { return }
+            self?.delegate?.controlPanelDidSelectLLMModel(model)
         }
 
         mediaInterruptionSelector.configure(options: [
@@ -1377,17 +1415,38 @@ private final class ControlPanelView: NSView {
             hint.textColor = DS.Color.textTertiary
             hint.maximumNumberOfLines = 2
 
+            let aiPromptCaption = NSTextField(labelWithString: L.t("Промпт для ИИ", "AI Prompt"))
+            aiPromptCaption.font = DS.Font.text(11, weight: .semibold)
+            aiPromptCaption.textColor = DS.Color.textTertiary
+
+            let aiPromptRow = makeHotkeyActionRow(
+                title: L.t("Продиктовать как промпт", "Dictate as prompt"),
+                subtitle: L.t(
+                    "Переформулирует речь в чёткий запрос для ИИ-ассистента (Claude Code, ChatGPT и т.п.) вместо обычной полировки. Необязательно.",
+                    "Rewrites your speech into a clear request for an AI assistant (Claude Code, ChatGPT, etc.) instead of regular polishing. Optional."),
+                label: aiPromptHotkeyLabel,
+                button: setAIPromptHotkeyButton,
+                extraButton: clearAIPromptHotkeyButton
+            )
+
             stack.addArrangedSubview(leftAligned(caption))
             stack.addArrangedSubview(toggleRow)
             toggleRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             stack.addArrangedSubview(holdRow)
             holdRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             stack.setCustomSpacing(14, after: holdRow)
-            stack.addArrangedSubview(leftAligned(hint))
+            let hintWrapper = leftAligned(hint)
+            stack.addArrangedSubview(hintWrapper)
+            stack.setCustomSpacing(16, after: hintWrapper)
+            stack.addArrangedSubview(leftAligned(aiPromptCaption))
+            stack.addArrangedSubview(aiPromptRow)
+            aiPromptRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            stack.addArrangedSubview(aiPromptModeToggle)
+            aiPromptModeToggle.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
     }
 
-    private func makeHotkeyActionRow(title: String, subtitle: String, label: NSTextField, button: StyledButton) -> NSView {
+    private func makeHotkeyActionRow(title: String, subtitle: String, label: NSTextField, button: StyledButton, extraButton: StyledButton? = nil) -> NSView {
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = DS.Font.text(14, weight: .semibold)
         titleLabel.textColor = DS.Color.textPrimary
@@ -1426,7 +1485,11 @@ private final class ControlPanelView: NSView {
             chip.widthAnchor.constraint(greaterThanOrEqualToConstant: 64)
         ])
 
-        let row = NSStackView(views: [textStack, NSView(), chip, button])
+        var rowViews: [NSView] = [textStack, NSView(), chip, button]
+        if let extraButton {
+            rowViews.append(extraButton)
+        }
+        let row = NSStackView(views: rowViews)
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 12
@@ -1510,7 +1573,16 @@ private final class ControlPanelView: NSView {
             llmDownloadProgress.controlSize = .regular
             llmDownloadProgress.isHidden = true
 
+            let llmSelectorCaption = NSTextField(labelWithString: L.t("Модель ИИ", "AI model"))
+            llmSelectorCaption.font = DS.Font.text(11, weight: .semibold)
+            llmSelectorCaption.textColor = DS.Color.textTertiary
+
             let llmPanel = makeInsetPanel { p in
+                // Выбор модели из каталога (баланс скорость/качество) — сверху под-карточки.
+                p.addArrangedSubview(leftAligned(llmSelectorCaption))
+                p.addArrangedSubview(llmModelSelector)
+                llmModelSelector.widthAnchor.constraint(equalTo: p.widthAnchor).isActive = true
+                p.addArrangedSubview(spacer(height: 4))
                 p.addArrangedSubview(headerRow)
                 headerRow.widthAnchor.constraint(equalTo: p.widthAnchor).isActive = true
                 p.addArrangedSubview(llmModelHint)
@@ -1520,6 +1592,9 @@ private final class ControlPanelView: NSView {
             }
             stack.addArrangedSubview(llmPanel)
             stack.addArrangedSubview(spacer(height: 6))
+            self.localLLMModelPanel = llmPanel
+            // Видна только при «Умная (ИИ)»; updateControlPanel выставит верное состояние.
+            llmPanel.isHidden = true
 
             stack.addArrangedSubview(removeFillersToggle)
         }
@@ -1981,14 +2056,17 @@ private final class ControlPanelView: NSView {
         modelDirectoryPathField.stringValue = settings.modelDirectoryPath
         toggleHotkeyLabel.stringValue = settings.toggleHotkey.displayText
         pushToTalkHotkeyLabel.stringValue = settings.pushToTalkHotkey.displayText
+        aiPromptHotkeyLabel.stringValue = settings.aiPromptHotkey.isAssignable ? settings.aiPromptHotkey.displayText : L.t("Не назначено", "Not set")
         if let item = polishLevelPopup.itemArray.first(where: { ($0.representedObject as? String) == settings.polishLevel.rawValue }) {
             polishLevelPopup.select(item)
         }
         polishLevelSelector.select(id: settings.polishLevel.rawValue)
         cloudPolishPanel?.isHidden = settings.polishLevel != .cloud
+        localLLMModelPanel?.isHidden = settings.polishLevel != .localLLM
         mediaInterruptionSelector.select(id: settings.mediaInterruptionMode.rawValue)
         autoPasteToggle.setOn(settings.autoPasteEnabled)
         removeFillersToggle.setOn(settings.removeFillerWords)
+        aiPromptModeToggle.setOn(settings.aiPromptModeEnabled)
         smartContextToggle.setOn(settings.smartContextEnabled)
         launchAtLoginToggle.setOn(settings.launchAtLogin)
         showInDockToggle.setOn(settings.showInDock)
@@ -2239,48 +2317,152 @@ private final class ControlPanelView: NSView {
         beginHotkeyCapture(for: .pushToTalk, label: pushToTalkHotkeyLabel)
     }
 
+    @objc private func beginAIPromptHotkeyCapture() {
+        beginHotkeyCapture(for: .aiPrompt, label: aiPromptHotkeyLabel)
+    }
+
+    @objc private func clearAIPromptHotkey() {
+        endHotkeyCapture()
+        aiPromptHotkeyLabel.stringValue = L.t("Не назначено", "Not set")
+        delegate?.controlPanelDidClearAIPromptHotkey()
+    }
+
+    private func endHotkeyCapture() {
+        if let monitor = hotkeyCaptureMonitor {
+            NSEvent.removeMonitor(monitor)
+            hotkeyCaptureMonitor = nil
+        }
+        if let observer = hotkeyCaptureFocusObserver {
+            NotificationCenter.default.removeObserver(observer)
+            hotkeyCaptureFocusObserver = nil
+        }
+    }
+
     private func beginHotkeyCapture(for action: DictationHotkeyAction, label: NSTextField) {
-        if let hotkeyCaptureMonitor {
-            NSEvent.removeMonitor(hotkeyCaptureMonitor)
-            self.hotkeyCaptureMonitor = nil
+        endHotkeyCapture()
+
+        // Запоминаем прежнее значение, чтобы вернуть его при отмене (Esc / потеря фокуса).
+        let previousValue = label.stringValue
+        label.stringValue = L.t("Нажмите…", "Press…")
+
+        // Отмена записи, если окно настроек потеряло фокус (клик в другое окно/приложение).
+        // Без этого «зависший» монитор продолжал жить и перехватывал СЛЕДУЮЩИЙ случайный
+        // шорткат — например рефлекторный Cmd+C — и назначал его на пункт.
+        if let window = label.window {
+            hotkeyCaptureFocusObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                // queue: .main гарантирует выполнение на главном потоке — сообщаем это
+                // тайп-чекеру, чтобы трогать MainActor-isolated UI без warning.
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    label.stringValue = previousValue
+                    self.endHotkeyCapture()
+                }
+            }
         }
 
-        label.stringValue = L.t("Нажмите…", "Press…")
+        // Состояние «тапа» одиночного модификатора: кандидат-keyCode и был ли keyDown
+        // обычной клавиши (тогда это комбо, а не одиночный модификатор).
+        var pendingSoloKeyCode: UInt16?
+        var sawKeyDownDuringCapture = false
+
         hotkeyCaptureMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
+            DiagnosticsLog.write("hotkey capture: type=\(event.type.rawValue) keyCode=\(event.keyCode) modifiers=\(event.hotkeyModifierNames)")
+
             if event.type == .flagsChanged {
-                guard event.modifierFlags.contains(.function) else {
+                // Fn — назначается сразу (одиночный модификатор, не печатает символ).
+                if event.modifierFlags.contains(.function) {
+                    self.assignCapturedHotkey(.fn, label: label, action: action)
                     return nil
                 }
-                let hotkey = Hotkey.fn
-                label.stringValue = hotkey.displayText
-                self.delegate?.controlPanelDidSetHotkey(hotkey, for: action)
-                if let monitor = self.hotkeyCaptureMonitor {
-                    NSEvent.removeMonitor(monitor)
-                    self.hotkeyCaptureMonitor = nil
+                let names = event.hotkeyModifierNames
+                if names.count == 1,
+                   let name = names.first,
+                   Hotkey.modifierName(forKeyCode: UInt16(event.keyCode)) == name {
+                    let keyCode = UInt16(event.keyCode)
+                    // Для «Промпт для ИИ» одиночный Option/Control назначаем СРАЗУ при нажатии,
+                    // НЕ дожидаясь отпускания. Это критично против внешних ремапперов клавиш:
+                    // у некоторых пользователей правый Option перемаплен и система присылает
+                    // следом подменённый keyDown (напр. Cmd+C) через миллисекунды. Назначив
+                    // на flagsChanged-down, мы опережаем подмену и закрываем запись до неё.
+                    if action == .aiPrompt, Hotkey.isSoloAssignableModifierKeyCode(keyCode) {
+                        self.assignCapturedHotkey(Hotkey(keyCode: keyCode, modifierFlags: [name]),
+                                                  label: label, action: action)
+                        return nil
+                    }
+                    // Прочие случаи (toggle/PTT) — модификатор сам по себе не назначаем,
+                    // показываем вживую и ждём обычную клавишу для комбо.
+                    pendingSoloKeyCode = keyCode
+                    sawKeyDownDuringCapture = false
+                    label.stringValue = (Self.modifierSymbol(name) ?? "") + "…"
+                } else if names.isEmpty {
+                    pendingSoloKeyCode = nil
+                    label.stringValue = L.t("Нажмите…", "Press…")
+                } else {
+                    // Несколько модификаторов — ждём обычную клавишу для комбо.
+                    pendingSoloKeyCode = nil
+                    label.stringValue = names.compactMap(Self.modifierSymbol).joined() + "…"
                 }
                 return nil
             }
 
             guard event.type == .keyDown else { return nil }
+
+            // Esc — отмена записи без назначения (явный выход из режима «Нажмите…»).
+            if event.keyCode == 53 {
+                label.stringValue = previousValue
+                self.endHotkeyCapture()
+                return nil
+            }
+
+            // Защита от ремапперов: если только что был зажат одиночный модификатор, а пришёл
+            // keyDown с ДРУГИМ модификатором (не содержит зажатый) — это подменённое событие
+            // внешнего ремаппера (правый Option → Cmd+C и т.п.). Не назначаем такой фантом.
+            if let soloKeyCode = pendingSoloKeyCode,
+               let soloName = Hotkey.modifierName(forKeyCode: soloKeyCode),
+               !event.hotkeyModifierNames.contains(soloName) {
+                DiagnosticsLog.write("hotkey capture: ignored phantom keyDown keyCode=\(event.keyCode) modifiers=\(event.hotkeyModifierNames) while \(soloName) held (remapper?)")
+                return nil
+            }
+
+            sawKeyDownDuringCapture = true
+
             let modifiers = event.hotkeyModifierNames
             guard !modifiers.isEmpty else {
-                label.stringValue = L.t("Модификатор", "Modifier")
+                label.stringValue = L.t("Добавьте модификатор", "Add a modifier")
                 return nil
             }
             guard !Hotkey.isModifierOnlyKeyCode(UInt16(event.keyCode)) else {
                 return nil
             }
 
-            let hotkey = Hotkey(keyCode: UInt16(event.keyCode), modifierFlags: modifiers)
-            label.stringValue = hotkey.displayText
-            self.delegate?.controlPanelDidSetHotkey(hotkey, for: action)
-
-            if let monitor = self.hotkeyCaptureMonitor {
-                NSEvent.removeMonitor(monitor)
-                self.hotkeyCaptureMonitor = nil
-            }
+            self.assignCapturedHotkey(Hotkey(keyCode: UInt16(event.keyCode), modifierFlags: modifiers),
+                                      label: label, action: action)
             return nil
+        }
+    }
+
+    /// Завершает запись хоткея: ставит подпись, уведомляет делегата, закрывает монитор.
+    private func assignCapturedHotkey(_ hotkey: Hotkey, label: NSTextField, action: DictationHotkeyAction) {
+        DiagnosticsLog.write("hotkey capture: assigned \(hotkey.displayText) for \(action.rawValue)")
+        label.stringValue = hotkey.displayText
+        delegate?.controlPanelDidSetHotkey(hotkey, for: action)
+        endHotkeyCapture()
+    }
+
+    /// Символ модификатора для живого показа во время записи хоткея.
+    private static func modifierSymbol(_ name: String) -> String? {
+        switch name {
+        case "command": return "⌘"
+        case "shift": return "⇧"
+        case "option": return "⌥"
+        case "control": return "⌃"
+        case "function": return "Fn"
+        default: return nil
         }
     }
 
@@ -3784,8 +3966,10 @@ private final class QuickActionTile: NSView {
 
     // Весь тайл — одна кликабельная зона: дочерние лейблы не должны перехватывать
     // mouseDown/наводку (иначе курсор переключается в текстовый и клик не срабатывает).
+    // `point` приходит в координатах СУПЕРВЬЮ — обязателен convert, иначе (origin≠0)
+    // клик по одному тайлу уезжает на соседний (у всех тайлов одинаковый bounds).
     override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? self : nil
+        bounds.contains(convert(point, from: superview)) ? self : nil
     }
 }
 
@@ -3952,14 +4136,16 @@ private enum PickerPositioning {
         let screenFrame = parent.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? anchorOnScreen
         let margin: CGFloat = 8
 
-        var x = anchorOnScreen.minX
+        // Выравниваем ПРАВЫЙ край попапа по правому краю строки-якоря (там значение и
+        // шеврон — попап раскрывается «оттуда», как dropdown), а не от левого края.
+        var x = anchorOnScreen.maxX - size.width
         if x + size.width > screenFrame.maxX { x = screenFrame.maxX - size.width - margin }
         if x < screenFrame.minX { x = screenFrame.minX + margin }
 
-        // По умолчанию — под строкой; если не влезает, показываем над ней.
-        var y = anchorOnScreen.minY - size.height - 6
+        // Под строкой, с небольшим зазором вниз; если не влезает — показываем над ней.
+        var y = anchorOnScreen.minY - size.height - 8
         if y < screenFrame.minY {
-            y = anchorOnScreen.maxY + 6
+            y = anchorOnScreen.maxY + 8
         }
         if y + size.height > screenFrame.maxY { y = screenFrame.maxY - size.height - margin }
 

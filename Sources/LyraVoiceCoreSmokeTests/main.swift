@@ -61,6 +61,23 @@ func testFormatsLongDictationIntoParagraphs() {
     )
 }
 
+func testDoesNotSplitDecimalAcrossSentences() {
+    // Точка внутри числа («1.00», «3.14») — НЕ конец предложения. Раньше «до 1.00 августа»
+    // рвалось на «до 1.» + «00 августа» и собиралось как «до 1. 00 августа».
+    let input = "Поделитесь планами до 1.00 августа."
+    let output = TextPostProcessor.dictationCleanup(input)
+    expect(
+        output == "Поделитесь планами до 1.00 августа.",
+        "decimal must not be split into a sentence gap, got: \(output)"
+    )
+
+    let pi = TextPostProcessor.dictationCleanup("Число пи примерно 3.14, это всем известно.")
+    expect(
+        pi == "Число пи примерно 3.14, это всем известно.",
+        "decimal pi must survive, got: \(pi)"
+    )
+}
+
 func testAddsParagraphsOnSemanticTransitions() {
     let input = "Починили горячие клавиши. Теперь сочетания должны выглядеть аккуратно. Также нужно привести диктовку к читаемому виду. Лишние точки и слова-паразиты мешают воспринимать текст."
     let output = TextPostProcessor.dictationCleanup(input)
@@ -108,6 +125,30 @@ func testLocalLLMModelDefaults() {
     expect(model.isDownloaded(inModelDirectory: emptyDir) == false, "model should not be reported as downloaded in empty dir")
 }
 
+func testLocalLLMModelCatalog() {
+    // Каталог из трёх Qwen2.5-Instruct вариантов; у каждого валидный GGUF-URL.
+    let models = LocalLLMModel.builtInModels
+    expect(models.count == 3, "catalog should have 3 models, got: \(models.count)")
+    for m in models {
+        expect(m.downloadURL.absoluteString.hasSuffix(m.fileName), "\(m.id): download url points at file")
+        expect(LocalLLMModel.find(id: m.id) == m, "\(m.id): find returns the same model")
+    }
+    expect(LocalLLMModel.recommended.id == "qwen2.5-7b-instruct-q4", "7B is recommended")
+    expect(LocalLLMModel.find(id: "nonexistent") == nil, "unknown id resolves to nil")
+}
+
+func testSelectedLLMModelResolvesAndFallsBack() {
+    var s = AppSettings.defaultSettings()
+    // Дефолтная настройка указывает на дефолтную модель.
+    expect(s.selectedLLMModel == LocalLLMModel.default, "default settings resolve to default model")
+    // Явный выбор 14B резолвится в неё.
+    s.selectedLLMModelID = "qwen2.5-14b-instruct-q4"
+    expect(s.selectedLLMModel == LocalLLMModel.qwen14BInstruct, "explicit 14B resolves")
+    // Неизвестный ID (напр. после отката версии) безопасно падает на дефолт.
+    s.selectedLLMModelID = "removed-model"
+    expect(s.selectedLLMModel == LocalLLMModel.default, "unknown id falls back to default model")
+}
+
 func testLocalLLMPolisherFallsBackToRulesWhenServerUnavailable() async throws {
     // Заведомо недоступный порт → сетевой запрос провалится → безопасный откат на правила.
     let endpoint = URL(string: "http://127.0.0.1:9/v1/chat/completions")!
@@ -133,6 +174,26 @@ func testRemovesEditorSubtitleCredits() {
     expect(tail == "Проверим, как работает сервис.", "editor subtitle credits removed from tail, got: \(tail)")
     expect(head == "Основной текст диктовки.", "editor subtitle credits removed from head, got: \(head)")
     expect(onlyCredits.isEmpty, "pure credit hallucination collapses to empty, got: \(onlyCredits)")
+}
+
+func testInsertsCommasAfterIntroductoryWords() {
+    // Вводное в начале текста, после точки и после переноса — везде ставим запятую.
+    let head = TextPostProcessor.insertIntroductoryCommas("конечно сделаю это завтра")
+    let afterDot = TextPostProcessor.insertIntroductoryCommas("Я подумаю. Возможно завтра успею.")
+    let multiword = TextPostProcessor.insertIntroductoryCommas("к сожалению не получилось")
+    // Не дублируем запятую, если она уже есть.
+    let already = TextPostProcessor.insertIntroductoryCommas("Кстати, я забыл сказать.")
+    // Не трогаем слово в середине предложения (там оно не вводное).
+    let midSentence = TextPostProcessor.insertIntroductoryCommas("Я сделаю это конечно быстро.")
+    // «конечно же» обособляется после «же», а не после «конечно» — не разрезаем.
+    let withParticle = TextPostProcessor.insertIntroductoryCommas("конечно же я приду")
+
+    expect(head == "конечно, сделаю это завтра", "comma after leading introducer, got: \(head)")
+    expect(afterDot == "Я подумаю. Возможно, завтра успею.", "comma after sentence-start introducer, got: \(afterDot)")
+    expect(multiword == "к сожалению, не получилось", "comma after multiword introducer, got: \(multiword)")
+    expect(already == "Кстати, я забыл сказать.", "no duplicate comma, got: \(already)")
+    expect(midSentence == "Я сделаю это конечно быстро.", "mid-sentence word untouched, got: \(midSentence)")
+    expect(withParticle == "конечно же я приду", "introducer + particle not split, got: \(withParticle)")
 }
 
 func testNormalizesWhisperSegmentNewlines() {
@@ -481,6 +542,34 @@ func testModifierOnlyKeyCodesAreNotCapturableHotkeys() {
     expect(Hotkey.isModifierOnlyKeyCode(62), "right control key code should be modifier-only")
     expect(!Hotkey.isModifierOnlyKeyCode(40), "K key code should stay capturable")
     expect(!Hotkey.isModifierOnlyKeyCode(49), "Space key code should stay capturable")
+}
+
+func testSoloModifierHotkeysAssignable() {
+    // Option и Control можно назначить как одиночный хоткей-тап; Command и Shift — нет.
+    let rightOption = Hotkey(keyCode: 61, modifierFlags: ["option"])
+    let leftControl = Hotkey(keyCode: 59, modifierFlags: ["control"])
+    let rightCommand = Hotkey(keyCode: 54, modifierFlags: ["command"])
+    let leftShift = Hotkey(keyCode: 56, modifierFlags: ["shift"])
+
+    expect(rightOption.isAssignable, "solo right Option should be assignable")
+    expect(leftControl.isAssignable, "solo left Control should be assignable")
+    expect(!rightCommand.isAssignable, "solo Command must NOT be assignable")
+    expect(!leftShift.isAssignable, "solo Shift must NOT be assignable")
+
+    // Одиночный модификатор показывается именем клавиши, без дублирующего символа.
+    expect(rightOption.displayText == "Option", "solo Option display, got: \(rightOption.displayText)")
+    expect(leftControl.displayText == "Control", "solo Control display, got: \(leftControl.displayText)")
+
+    // Комбо Option+K остаётся валидным (обычная клавиша + модификатор).
+    let combo = Hotkey(keyCode: 40, modifierFlags: ["option"])
+    expect(combo.isAssignable, "Option+K combo still assignable")
+
+    // Маппинг keyCode → имя модификатора и список «безопасных» одиночных.
+    expect(Hotkey.modifierName(forKeyCode: 61) == "option", "keyCode 61 → option")
+    expect(Hotkey.modifierName(forKeyCode: 59) == "control", "keyCode 59 → control")
+    expect(Hotkey.modifierName(forKeyCode: 40) == nil, "non-modifier keyCode → nil")
+    expect(Hotkey.isSoloAssignableModifierKeyCode(61), "right Option is solo-assignable")
+    expect(!Hotkey.isSoloAssignableModifierKeyCode(54), "Command is NOT solo-assignable")
 }
 
 func testDictationUsageSummaryCountsWordsAndDuration() {
@@ -997,6 +1086,10 @@ func testBuiltInVocabularyDisambiguatesClaudeCloudAndICloud() async throws {
     let claudeCode = try await RulePolisher().polish("открой клод козе")
     expect(claudeCode == "Открой Claude Code",
            "common ASR misspelling 'Клод Козе' should normalize to Claude Code, got: \(claudeCode)")
+
+    let cloudCode = try await RulePolisher().polish("открой cloud code")
+    expect(cloudCode == "Открой Claude Code",
+           "English ASR misspelling 'Cloud Code' should normalize to Claude Code, got: \(cloudCode)")
 }
 
 func testUserDictionaryOverridesBuiltInVocabulary() async throws {
@@ -1387,14 +1480,18 @@ do {
     testNormalizesWhitespaceWithoutChangingMeaning()
     testKeepsIntentionalParagraphBreaks()
     testFormatsLongDictationIntoParagraphs()
+    testDoesNotSplitDecimalAcrossSentences()
     testAddsParagraphsOnSemanticTransitions()
     testKeepsShortDictationAsSingleParagraph()
     testStrongMarkerStartsNewParagraph()
     testSplitsVeryLongWallOfText()
     testLocalLLMModelDefaults()
+    testLocalLLMModelCatalog()
+    testSelectedLLMModelResolvesAndFallsBack()
     try await testLocalLLMPolisherFallsBackToRulesWhenServerUnavailable()
     testRemovesSubtitleHallucinationTail()
     testRemovesEditorSubtitleCredits()
+    testInsertsCommasAfterIntroductoryWords()
     testNormalizesWhisperSegmentNewlines()
     try testAppendAndReadHistoryEntriesNewestFirst()
     try testHistoryDeleteAndClear()
@@ -1414,6 +1511,7 @@ do {
     testAppBrandDeclaresLogoAssets()
     testFunctionKeyHotkeyDisplaysAsFn()
     testModifierOnlyKeyCodesAreNotCapturableHotkeys()
+    testSoloModifierHotkeysAssignable()
     testDictationUsageSummaryCountsWordsAndDuration()
     try testUsageStatsLifetimeIgnoresRetentionWindow()
     try testUsageStatsPeriodSlices()

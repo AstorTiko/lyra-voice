@@ -392,8 +392,19 @@ final class GlassContainerView: NSView {
         tint.layer?.masksToBounds = true
         addSubview(tint)
 
-        // 3. Контент.
+        // 3. Контент. Закрепляем по краям контейнера Auto Layout-констрейнтами, а не
+        // ручным frame в layout(): ручной frame вызывающие легко ломали
+        // (`contentView.translatesAutoresizingMaskIntoConstraints = false` без
+        // констрейнтов → движок обнулял frame в super.layout() → попапы рендерились
+        // пустыми). Констрейнты гарантируют корректный размер независимо от вызывающих.
+        contentView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(contentView)
+        NSLayoutConstraint.activate([
+            contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            contentView.topAnchor.constraint(equalTo: topAnchor),
+            contentView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
 
         // 4. Кромка + тень.
         layer?.cornerRadius = cornerRadius
@@ -440,10 +451,11 @@ final class GlassContainerView: NSView {
     required init?(coder: NSCoder) { nil }
 
     override func layout() {
+        // contentView закреплён констрейнтами к краям (см. init) — super.layout()
+        // решит его размер и размеры вложенных autolayout-подвью за один проход.
         super.layout()
         blur.frame = bounds
         tint.frame = bounds
-        contentView.frame = bounds
         layer?.cornerRadius = cornerRadius
         edgeLight.frame = bounds
         specular.frame = bounds
