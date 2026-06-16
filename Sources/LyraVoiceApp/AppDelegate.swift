@@ -1174,7 +1174,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DiagnosticsLog.write("paste outcome=copiedNeedsAccess characters=\(text.count)")
             setControlPanelState(.copied)
             overlayController.hide()
-            resultCardController.show(text: text, hint: L.t("Включите \(AppBrand.displayName) в «Универсальном доступе»", "Enable \(AppBrand.displayName) in Accessibility settings"))
+            // Показываем системный диалог macOS «Разрешить Accessibility» — открывает
+            // Системные настройки. Текст уже в буфере, поэтому пользователь может вставить
+            // ⌘V сразу, а следующие диктовки будут вставляться автоматически.
+            _ = AccessibilityPermission.requestIfNeeded()
+            resultCardController.show(
+                text: text,
+                hint: L.t(
+                    "Текст скопирован — нажмите ⌘V. Затем включите \(AppBrand.displayName) в «Универсальном доступе»",
+                    "Text copied — press ⌘V now. Then enable \(AppBrand.displayName) in Accessibility settings"
+                )
+            )
         }
     }
 

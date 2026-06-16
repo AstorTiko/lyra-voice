@@ -14,7 +14,7 @@ public enum AppBrand {
 
     /// Версия приложения для отображения в настройках (H1). Пока без bundle Info.plist
     /// (SwiftPM exe) — фиксированное значение, обновляется вручную при релизах.
-    public static let versionString = "0.1.0"
+    public static let versionString = "0.1.1"
 
     /// Репозиторий GitHub (owner/name) для проверки обновлений через Releases API.
     public static let updateRepository = "AstorTiko/lyra-voice"
